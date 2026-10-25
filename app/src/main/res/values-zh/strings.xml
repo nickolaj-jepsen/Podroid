@@ -369,4 +369,12 @@
     <string name="avf_action_switch_qemu">切换至 QEMU</string>
     <string name="avf_action_retry">重试</string>
     <string name="avf_net_workaround_failed">此设备上 AVF 联网所需的兼容性设置失败，Linux 系统启动后可能没有网络连接。如果网络不可用，请将后端切换至 QEMU。</string>
+    <string name="disk_image">磁盘镜像</string>
+    <string name="disk_image_boot">AVF 启动</string>
+    <string name="disk_image_none">Alpine（未导入镜像）</string>
+    <string name="disk_image_importing">正在导入… %1$s</string>
+    <string name="disk_image_import">导入磁盘镜像</string>
+    <string name="disk_image_remove">删除磁盘镜像</string>
+    <string name="disk_image_imported">磁盘镜像已导入</string>
+    <string name="disk_image_import_failed">导入失败：%1$s</string>
 </resources>

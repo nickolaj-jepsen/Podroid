@@ -383,6 +383,8 @@ fun SettingsScreen(
                     )
                 }
 
+                DiskImageSection(enabled = vmNotRunning)
+
                 // ── ABOUT ─────────────────────────────────────────────
                 // Use lifecycle-aware collection to match the rest of the screen.
                 val avfVerbose by viewModel.avfVerboseLogging.collectAsStateWithLifecycle()

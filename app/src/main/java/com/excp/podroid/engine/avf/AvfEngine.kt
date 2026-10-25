@@ -199,6 +199,8 @@ class AvfEngine @Inject constructor(
     // raw AIDL, the #29 fix proper) — launchAttempt must then arm the createVm
     // hook; the cmdline carries no nr_cpus on that path.
     @Volatile private var useExplicitCpuCount = false
+    // True when the current boot is an imported disk image (AvfDiskImage), not Alpine.
+    @Volatile private var diskImageMode = false
 
     /** Backend-specific diagnostics for the export log (observational only). */
     @Volatile private var lastLifecycleEvent: String = "(no lifecycle callback yet)"
@@ -412,7 +414,8 @@ class AvfEngine @Inject constructor(
                     // on Tensor G3/G4. Step the core count down and relaunch rather
                     // than surfacing an error; only a reset at 1 core (or a clean
                     // stop) falls through to the normal terminal handling.
-                    if (!maybeRelaunchWithFewerCpus(generation, reason)) {
+                    if (!maybeRelaunchAfterGuestReboot(generation, reason) &&
+                        !maybeRelaunchWithFewerCpus(generation, reason)) {
                         // A stop while still Starting means the VM exited during boot;
                         // otherwise it's a clean stop. The funnel maps a user-stop to
                         // Stopped regardless and ignores stale/terminal transitions.
@@ -577,8 +580,34 @@ class AvfEngine @Inject constructor(
      * foreground service stays up (a terminal state would tear it down). The
      * ladder is finite and monotonic (e.g. 8 -> 2 -> 1), so this can't loop.
      */
+    /**
+     * A disk image's `reboot` (e.g. into a new NixOS generation) stops crosvm with
+     * STOP_REASON_REBOOT; boot it again instead of ending in Stopped. Returns
+     * true when it took over the stop.
+     */
+    private fun maybeRelaunchAfterGuestReboot(generation: Long, reason: Int): Boolean {
+        if (!diskImageMode || reason != STOP_REASON_REBOOT) return false
+        if (generation != vmGeneration) return false
+        if (stopRequested || _state.value !is VmState.Running) return false
+        val config = lastConfig ?: return false
+        val forwards = synchronized(lastPortForwards) { lastPortForwards.toList() }
+        Log.i(TAG, "disk image rebooted itself; relaunching")
+        scope.launch {
+            cleanup()
+            if (stopRequested) {
+                onVmTerminal(vmGeneration, VmState.Stopped)
+                return@launch
+            }
+            _state.value = VmState.Starting
+            launchAttempt(forwards, config, bootMsg = "Rebooting...")
+        }
+        return true
+    }
+
     private fun maybeRelaunchWithFewerCpus(generation: Long, reason: Int): Boolean {
         if (reason != STOP_REASON_REBOOT) return false
+        // A disk image's early reset is its own; the ladder only helps the Alpine kernel.
+        if (diskImageMode) return false
         if (generation != vmGeneration) return false
         if (stopRequested || _state.value !is VmState.Starting) return false
         val next = AvfCpuPolicy.nextRungDown(attemptedCpus) ?: return false
@@ -924,10 +953,13 @@ class AvfEngine @Inject constructor(
      * helper exactly so a VM can boot under either backend with the same
      * disk identity. The file is sparse — the actual disk allocation grows
      * as the guest writes blocks. Alpine's init formats it ext4 on first
-     * boot via the standard initramfs path.
+     * boot via the standard initramfs path. An imported disk image passes its
+     * own [storageFile] and is only ever grown; the guest grows its partition.
      */
-    private fun ensureStorageImage(storageSizeGb: Int): File {
-        val storageFile = File(context.filesDir, "storage.img")
+    private fun ensureStorageImage(
+        storageSizeGb: Int,
+        storageFile: File = File(context.filesDir, "storage.img"),
+    ): File {
         val desiredBytes = storageSizeGb.toLong() * 1024L * 1024L * 1024L
         if (storageFile.exists()) {
             val current = storageFile.length()
@@ -995,6 +1027,9 @@ class AvfEngine @Inject constructor(
     }
 
     private suspend fun buildConfig(mgr: Any, config: VmConfig): Any {
+        val diskImage = AvfDiskImage.file(context)
+        diskImageMode = diskImage.exists()
+        if (diskImageMode) return buildDiskImageConfig(mgr, config, diskImage)
         // Resolve the effective vCPU count: the user's request, clamped by any
         // per-device cap discovered by a prior early-boot reset (issue #29).
         // attemptedCpus feeds the onStopped fallback ladder.
@@ -1136,6 +1171,45 @@ class AvfEngine @Inject constructor(
         launchConfigSummary = "vCPUs=$effectiveCpus ($cpuMode, requested ${config.cpus}$capStr), " +
             "memory=${config.ramMb}MB, console=hvc0, " +
             "protectedVm=$protectedStr, downloadsShare=$shareSummary, verboseLogging=${config.verboseLogging}"
+        return AvfReflect.build(vb)
+    }
+
+    /**
+     * Config for an imported disk image: AVF's u-boot finds the image's ESP and
+     * runs its boot loader, so the kernel, initrd and cmdline are the image's
+     * own (none of the podroid.* parameters reach it). MATCH_HOST gives the
+     * guest every host core; the image must pass arm64.nompam itself (#108).
+     */
+    private fun buildDiskImageConfig(mgr: Any, config: VmConfig, diskImage: File): Any {
+        attemptedCpus = Runtime.getRuntime().availableProcessors()
+        useExplicitCpuCount = false
+        AvfReflect.disarmExplicitCpuCount()
+        ensureStorageImage(config.storageSizeGb, diskImage)
+
+        val cb = AvfReflect.newCustomBuilder()
+        AvfReflect.setName(cb, VM_NAME)
+        AvfReflect.setBootloaderPath(cb, AvfDiskImage.UBOOT_PATH)
+        AvfReflect.addDisk(cb, diskImage.absolutePath, writable = true)
+        AvfReflect.setNetworkSupported(cb, true)
+        // Forces the net-capable full crosvm, as in buildConfig.
+        AvfReflect.setGpuConfig(cb)
+        val customCfg = AvfReflect.build(cb)
+
+        val vb = AvfReflect.newVmConfigBuilder(context)
+        val choice = AvfReflect.applyProtectedVm(mgr, vb)
+        if (choice is AvfCapabilities.ProtectedVmChoice.Unsupported) {
+            throw UnsupportedOperationException(choice.reason)
+        }
+        AvfReflect.setMemoryBytes(vb, config.ramMb.toLong() * 1024 * 1024)
+        AvfReflect.setNumCpus(vb, attemptedCpus)
+        AvfReflect.setDebugLevel(vb, AvfReflect.DEBUG_LEVEL_FULL)
+        AvfReflect.setConsoleInputDevice(vb, "hvc0")
+        AvfReflect.setConnectVmConsole(vb, false)
+        AvfReflect.setVmOutputCaptured(vb, true)
+        AvfReflect.setVmConsoleInputSupported(vb, true)
+        AvfReflect.setCustomImageConfig(vb, customCfg)
+        launchConfigSummary = "disk image ${diskImage.length() / (1024 * 1024)}MB via u-boot, " +
+            "vCPUs=$attemptedCpus (match-host), memory=${config.ramMb}MB, console=hvc0"
         return AvfReflect.build(vb)
     }
 }

@@ -368,4 +368,12 @@
     <string name="avf_action_switch_qemu">Switch to QEMU</string>
     <string name="avf_action_retry">Retry</string>
     <string name="avf_net_workaround_failed">A compatibility step needed for AVF networking failed on this device. Linux may start without network access. If so, switch the backend to QEMU.</string>
+    <string name="disk_image">Disk image</string>
+    <string name="disk_image_boot">AVF boots</string>
+    <string name="disk_image_none">Alpine (no image imported)</string>
+    <string name="disk_image_importing">Importing… %1$s</string>
+    <string name="disk_image_import">Import disk image</string>
+    <string name="disk_image_remove">Remove disk image</string>
+    <string name="disk_image_imported">Disk image imported</string>
+    <string name="disk_image_import_failed">Import failed: %1$s</string>
 </resources>

@@ -340,6 +340,7 @@ object AvfReflect {
     fun setName(b: Any, name: String) { invokeDecl(b, "setName", String::class.java to name) }
     fun setKernelPath(b: Any, p: String) { invokeDecl(b, "setKernelPath", String::class.java to p) }
     fun setInitrdPath(b: Any, p: String) { invokeDecl(b, "setInitrdPath", String::class.java to p) }
+    fun setBootloaderPath(b: Any, p: String) { invokeDecl(b, "setBootloaderPath", String::class.java to p) }
     /** Adds each whitespace-separated token of [params] via addParam(String). */
     fun addParams(b: Any, params: String) {
         val tokens = params.trim().split(Regex("\\s+")).filter { it.isNotEmpty() }
